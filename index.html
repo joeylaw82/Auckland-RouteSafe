@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auckland Bus Route Crime Analysis</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+          integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+          crossorigin=""/>
+    <style>
+        /* Basic styling for the map container */
+        #map {
+            height: 100vh;
+            width: 75%; /* 地圖佔 75% 寬度 */
+            float: left;
+        }
+        /* Style for the sidebar/details panel */
+        #route-details {
+            height: 100vh;
+            width: 25%; /* 側邊欄佔 25% 寬度 */
+            float: right;
+            background-color: #f8f9fa;
+            padding: 15px;
+            box-sizing: border-box;
+            overflow-y: auto; /* 允許垂直滾動 */
+            font-family: Arial, Helvetica, sans-serif;
+            border-left: 1px solid #ddd;
+        }
+        #route-details h2 {
+            margin-top: 0;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 5px;
+            color: #007bff;
+        }
+        #route-details h3 {
+            color: #333;
+            margin-top: 15px;
+            font-size: 1.1em;
+        }
+        #route-details ul {
+            list-style: none;
+            padding: 0;
+        }
+        #route-details li {
+            padding: 3px 0;
+            border-bottom: 1px dotted #eee;
+        }
+        /* Style for the information panel (top-right box on the map) */
+        .info {
+            padding: 6px 8px;
+            font: 14px/16px Arial, Helvetica, sans-serif;
+            background: white;
+            background: rgba(255,255,255,0.9);
+            box-shadow: 0 0 15px rgba(0,0,0,0.2);
+            border-radius: 5px;
+        }
+        .info h4 {
+            margin: 0 0 5px;
+            color: #777;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    
+    <div id="route-details">
+        <h2>路線詳細數據</h2>
+        <p id="details-status">點擊地圖上的巴士路線以查看犯罪事件的月度趨勢和類型細分。</p>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+            integrity="sha256-20n6a329W8vB0V9B0o/1M+k9+8b6bB2/9wF/nF3D1C8="
+            crossorigin=""></script>
+
+    <script>
+        // Global variable to store the crime breakdown data
+        let crimeStatsData = null;
+
+        // --- 1. Map Initialization ---
+        // 設置地圖視角到奧克蘭中心 (Auckland: -36.8485, 174.7633)
+        const map = L.map('map').setView([-36.8485, 174.7633], 12); 
+
+        // 添加基礎地圖圖層 (OpenStreetMap)
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        // --- 2. 樣式和顏色函數 ---
+        
+        /**
+         * 根據犯罪總數返回顏色值 (顏色漸變/色標)
+         */
+        function getColor(d) {
+            return d > 500 ? '#800026' : 
+                   d > 200 ? '#BD0026' :
+                   d > 100 ? '#E31A1C' :
+                   d > 50  ? '#FC4E2A' :
+                   d > 20  ? '#FD8D3C' :
+                   d > 10  ? '#FEB24C' : 
+                   d > 0   ? '#FED976' : 
+                             '#CCCCCC'; 
+        }
+
+        /**
+         * 定義 GeoJSON 圖層的樣式
+         */
+        function style(feature) {
+            return {
+                weight: 3,
+                opacity: 0.9,
+                color: getColor(feature.properties.Total_Crime_Count),
+                fillOpacity: 0.7
+            };
+        }
+
+        // --- 3. 數據加載和地圖整合 ---
+
+        async function loadData() {
+            try {
+                // Fetch GeoJSON 
+                const geoJsonUrl = 'data/route_crime_stats.geojson';
+                const geoJsonResponse = await fetch(geoJsonUrl);
+                const geoJsonData = await geoJsonResponse.json();
+
+                // Fetch and store Stats JSON globally
+                const statsJsonUrl = 'data/crime_breakdown.json';
+                const statsJsonResponse = await fetch(statsJsonUrl);
+                crimeStatsData = await statsJsonResponse.json();
+
+                // Display Metadata
+                displayMetadata(crimeStatsData.metadata);
+
+                // Add GeoJSON Layer to Map
+                L.geoJson(geoJsonData, {
+                    style: style,
+                    onEachFeature: function (feature, layer) {
+                        const routeNo = feature.properties['Route No'];
+                        const crimeCount = feature.properties.Total_Crime_Count;
+
+                        // 創建彈出窗口內容
+                        const popupContent = `
+                            <h4>🚌 巴士路線: ${routeNo}</h4>
+                            <p><strong>總犯罪事件數:</strong> ${crimeCount}</p>
+                            <p>點擊路線以在側邊欄查看詳細數據</p>
+                        `;
+                        layer.bindPopup(popupContent);
+                        
+                        // 💥 關鍵：添加點擊事件，調用 showRouteDetails
+                        layer.on({
+                            click: function(e) {
+                                showRouteDetails(routeNo, crimeCount);
+                                // map.fitBounds(e.target.getBounds()); // 可選：縮放到被點擊的路線
+                            },
+                            mouseover: function(e) {
+                                e.target.setStyle({weight: 6, color: '#00FFFF'});
+                                e.target.bringToFront();
+                            },
+                            mouseout: function(e) {
+                                L.geoJson.resetStyle(e.target);
+                            }
+                        });
+                    }
+                }).addTo(map);
+
+            } catch (error) {
+                console.error('Error loading GeoJSON or Stats JSON:', error);
+                document.getElementById('map').innerHTML = '<div class="info" style="color: red; margin: 20px;"><h3>數據加載錯誤</h3>請檢查 GitHub Actions 日誌。確保 data/route_crime_stats.geojson 和 data/crime_breakdown.json 檔案已成功部署。</div>';
+            }
+        }
+
+        // --- 4. 路線細節面板函數 ---
+
+        function showRouteDetails(routeNo, totalCrimeCount) {
+            const detailsDiv = document.getElementById('route-details');
+            
+            // 如果 JSON 中沒有該路線的數據（即該路線沒有犯罪發生），則使用總計數顯示簡潔信息
+            if (!crimeStatsData || !crimeStatsData.routes[routeNo]) {
+                detailsDiv.innerHTML = `
+                    <h2>🚌 路線: ${routeNo}</h2>
+                    <p><strong>總犯罪事件數: ${totalCrimeCount}</strong></p>
+                    <p style="color: gray;">無詳細犯罪類型或月度趨勢數據。</p>
+                `;
+                return;
+            }
+
+            const routeData = crimeStatsData.routes[routeNo];
+            
+            // --- 格式化月度趨勢 ---
+            let trendList = '<ul>';
+            // 按月份/年份排序
+            const sortedTrends = Object.entries(routeData.monthly_trend).sort((a, b) => a[0].localeCompare(b[0]));
+            if (sortedTrends.length > 0) {
+                sortedTrends.forEach(([month, count]) => {
+                    trendList += `<li><strong>${month}</strong>: ${count} 次事件</li>`;
+                });
+            } else {
+                trendList += '<li>無月度數據</li>';
+            }
+            trendList += '</ul>';
+
+            // --- 格式化類型細分 ---
+            let breakdownList = '<ul>';
+            // 按計數降序排序
+            const sortedBreakdown = Object.entries(routeData.type_breakdown).sort((a, b) => b[1] - a[1]);
+            if (sortedBreakdown.length > 0) {
+                sortedBreakdown.forEach(([type, count]) => {
+                    breakdownList += `<li><strong>${type}</strong>: ${count} 次事件</li>`;
+                });
+            } else {
+                breakdownList += '<li>無類型細分數據</li>';
+            }
+            breakdownList += '</ul>';
+
+            // --- 渲染到面板 ---
+            detailsDiv.innerHTML = `
+                <h2>🚌 路線: ${routeNo}</h2>
+                <p><strong>總犯罪事件數: ${totalCrimeCount}</strong></p>
+                
+                <h3>📅 月度趨勢 (Monthly Trend)</h3>
+                ${trendList}
+                
+                <h3>🚨 犯罪類型細分 (Type Breakdown)</h3>
+                ${breakdownList}
+            `;
+        }
+
+
+        // --- 5. 元數據面板控制 (保持不變) ---
+
+        function displayMetadata(metadata) {
+            const info = L.control({position: 'topright'});
+
+            info.onAdd = function (map) {
+                this._div = L.DomUtil.create('div', 'info');
+                this.update(metadata);
+                return this._div;
+            };
+
+            info.update = function (metadata) {
+                this._div.innerHTML = `
+                    <h4>🚌 奧克蘭巴士路線犯罪分析</h4>
+                    <b>分析時間範圍:</b> ${metadata.crime_period_start} to ${metadata.crime_period_end}<br>
+                    <b>緩衝區距離:</b> ${metadata.buffer_distance_m} 公尺
+                `;
+            };
+
+            info.addTo(map);
+        }
+
+        loadData();
+    </script>
+</body>
+</html>
