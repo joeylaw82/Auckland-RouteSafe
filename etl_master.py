@@ -359,4 +359,57 @@ def analyze_and_aggregate(gdf_routes: gpd.GeoDataFrame, gdf_crime: gpd.GeoDataFr
                                                         left_on='index', 
                                                         right_on='index_right', 
                                                         how='left')
-    gdf_results['Total_Crime_Count
+    gdf_results['Total_Crime_Count'] = gdf_results['Total_Crime_Count'].fillna(0).astype(int)
+    gdf_output = gdf_results.to_crs(epsg=4326)[['Route No', 'Total_Crime_Count', 'geometry']].copy()
+
+    # 8. 儲存結果
+    gdf_output.to_file(OUTPUT_FILE, driver='GeoJSON', encoding='utf-8')
+    print(f"✅ GeoJSON 輸出到 {OUTPUT_FILE}")
+    
+    with open(STATS_OUTPUT_FILE, 'w', encoding='utf-8') as f:
+        json.dump(crime_details, f, ensure_ascii=False, indent=4)
+    print(f"✅ 犯罪細分統計輸出到 {STATS_OUTPUT_FILE}")
+
+def empty_geojson_output(gdf_routes):
+    # 創建一個空的 GeoJSON 輸出
+    gdf_routes['Total_Crime_Count'] = 0
+    gdf_routes = gdf_routes.to_crs(epsg=4326)[['Route No', 'Total_Crime_Count', 'geometry']].copy()
+    gdf_routes.to_file(OUTPUT_FILE, driver='GeoJSON', encoding='utf-8')
+
+def empty_stats_output(min_date, max_date):
+    # 創建一個空的 JSON 輸出
+    crime_details = {
+        'metadata': {
+            'crime_period_start': min_date,
+            'crime_period_end': max_date,
+            'buffer_distance_m': 50,
+            'data_source': 'NZ Police (Full Available Dataset) merged with NZ Meshblock/Area Unit Geometry'
+        },
+        'routes': {}
+    }
+    with open(STATS_OUTPUT_FILE, 'w', encoding='utf-8') as f:
+        json.dump(crime_details, f, ensure_ascii=False, indent=4)
+
+
+# --- 5. 主流程 (Main Flow) ---
+def run_etl():
+    """運行 ETL 流程。"""
+    if not POLICE_DATA_URL:
+        print("❌ 錯誤：缺少 POLICE_DATA_URL 環境變量。請在 GitHub Secrets 中設置。")
+        sys.exit(1)
+        
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        
+        # 傳遞 Area Unit URL
+        gdf_crime = fetch_and_clean_police_data(POLICE_DATA_URL, MESHBLOCK_BASE_URL, AREA_UNIT_BASE_URL) 
+        gdf_routes = fetch_route_geometry()
+        analyze_and_aggregate(gdf_routes, gdf_crime)
+        print("\n🎉 ETL 流程全部成功完成！")
+    except Exception as e:
+        error_message = str(e).strip()
+        print(f"\n❌ ETL 流程中斷: {error_message}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    run_etl()
