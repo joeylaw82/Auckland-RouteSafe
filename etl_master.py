@@ -120,11 +120,24 @@ def fetch_arcgis_geometry(base_url: str, id_field: str, out_fields: list, mode='
     gdf_final = pd.concat(all_geometry, ignore_index=True)
     
     # Ensure all required fields are present (case-insensitive column check)
-    required_cols = [col.upper() for col in out_fields] + ['geometry']
+    out_fields_upper = [col.upper() for col in out_fields]
     col_map = {c.upper(): c for c in gdf_final.columns}
-    final_cols = [col_map[c] for c in required_cols if c in col_map]
     
-    return gdf_final[final_cols].copy()
+    # Select final columns including the geometry column (if it exists)
+    final_cols = [col_map[c] for c in out_fields_upper if c in col_map]
+
+    # Handle the geometry column name consistency
+    if isinstance(gdf_final, gpd.GeoDataFrame):
+        geom_name = gdf_final.geometry.name
+        if geom_name != 'geometry':
+            gdf_final = gdf_final.rename(columns={geom_name: 'geometry'})
+            gdf_final.set_geometry('geometry', inplace=True)
+            geom_name = 'geometry'
+        if geom_name not in final_cols:
+            final_cols.append(geom_name)
+    
+    # Use a set to maintain uniqueness and then convert back to a list
+    return gdf_final[list(set(final_cols))].copy()
 
 def fetch_all_meshblock_geometry(base_url: str) -> gpd.GeoDataFrame:
     """Fetches Meshblock Polygon geometry."""
@@ -173,6 +186,19 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
     
     if gdf_meshblocks.empty:
         return gpd.GeoDataFrame()
+        
+    # **FINAL ATTEMPT FIX**: Ensure Meshblock geometry column is consistently available as 'geometry' 
+    # and rename it for the merge operation to prevent column name clashes.
+    MESHBLOCK_GEOM_NAME = 'geometry_mb_source_temp'
+    if 'geometry' in gdf_meshblocks.columns:
+        gdf_meshblocks = gdf_meshblocks.rename(columns={'geometry': MESHBLOCK_GEOM_NAME})
+    elif gdf_meshblocks.geometry.name in gdf_meshblocks.columns:
+        # Fallback using the active geometry name
+        gdf_meshblocks = gdf_meshblocks.rename(columns={gdf_meshblocks.geometry.name: MESHBLOCK_GEOM_NAME})
+    else:
+        # Critical failure to find geometry column
+        raise KeyError("Meshblock geometry column not found in GeoDataFrame after fetch.")
+
 
     # Standardize Police data Meshblock ID (7-digit string)
     df_crime['Meshblock'] = df_crime['Meshblock'].astype(str).str.strip().str.zfill(7)
@@ -183,21 +209,18 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
     print(f"   -> Auckland filtered records: {len(df_auckland)}")
     
     # ----------------------------------------------------
-    # 3. Merge: Meshblock Polygon Match (FIX APPLIED HERE)
+    # 3. Merge: Meshblock Polygon Match
     # ----------------------------------------------------
     print("   -> Executing Merge: Meshblock Polygon geometry match...")
-    
-    # Rename the geometry column in gdf_meshblocks for a clean merge key
-    gdf_meshblocks = gdf_meshblocks.rename(columns={'geometry': 'geometry_mb_source'})
 
     df_merged = df_auckland.merge(
-        gdf_meshblocks[['MB_number', 'geometry_mb_source']], 
+        gdf_meshblocks[['MB_number', MESHBLOCK_GEOM_NAME]], 
         left_on='Meshblock', 
         right_on='MB_number', 
         how='left'
     )
     # RENAME the source geometry column to the final expected name 'geometry'
-    df_merged = df_merged.rename(columns={'geometry_mb_source': 'geometry'}) 
+    df_merged = df_merged.rename(columns={MESHBLOCK_GEOM_NAME: 'geometry'}) 
     
     unmatched_count = df_merged['geometry'].isna().sum()
     print(f"   -> Successfully matched records (Polygons): {len(df_merged) - unmatched_count}")
@@ -219,10 +242,9 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
         'ANZSOC Division': 'OffenceType',     
         'Territorial Authority Cleaned': 'PoliceDistrict', 
         CRIME_MONTH_COL_NAME: 'CrimeMonth',
-        # 'geometry' column already exists from the merge above
     })
     
-    # Drop records that have no Polygon geometry (now guaranteed to find 'geometry')
+    # Drop records that have no Polygon geometry
     initial_valid_count = len(df_final)
     df_final.dropna(subset=['geometry'], inplace=True) 
     
