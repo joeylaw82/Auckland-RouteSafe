@@ -1,81 +1,58 @@
-name: ETL Data Pipeline and Pages Deployment
+name: ETL and Deploy to Pages
 
 on:
   push:
     branches:
-      - main  # 在推送到 main 分支時觸發
-  workflow_dispatch: # 允許手動從 GitHub Actions 頁面觸發
+      - main
+  workflow_dispatch:
 
 jobs:
-  # Job 1: 構建 ETL 數據 (運行 Python 腳本並輸出 GeoJSON/JSON)
-  build-etl:
+  build_and_deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     
     steps:
-      - name: Checkout Code
+      - name: ⬇️ Checkout Repository
         uses: actions/checkout@v4
-      
-      # 將 POLICE_DATA_URL Secret 注入到環境中，供 etl_master.py 使用
-      - name: Setup Environment Variables
-        run: echo "POLICE_DATA_URL=${{ secrets.POLICE_DATA_URL }}" >> $GITHUB_ENV
 
-      - name: Set up Python
+      - name: 🐍 Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-          
-      # 安裝所有必要的依賴
-      - name: Install dependencies (GeoPandas, Pandas, Requests)
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: ⚙️ Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 注意：geopandas 會自動安裝其依賴 (pandas, shapely, fiona, etc.)
-          pip install pandas geopandas requests
+          pip install pandas geopandas requests shapely fiona pyproj
+          # Install gdal and associated requirements if needed for geopandas/fiona
+          sudo apt-get install -y libspatialindex-dev gdal-bin
           
-      # 運行 ETL 腳本，生成 GeoJSON 和 JSON 輸出檔案到 'data' 資料夾
-      - name: Run ETL Script (Generate GeoJSON/JSON in 'data' folder)
+      - name: 🏃 Run ETL Script
+        env:
+          POLICE_DATA_URL: ${{ secrets.POLICE_DATA_URL }}
         run: python etl_master.py
         
-      # 關鍵步驟：上傳生成的 'data' 文件夾作為 Artifact
-      - name: Upload ETL Data Artifact
+      # -----------------------------------------------------------
+      # 📦 CRITICAL FIX: Upload the 'data' directory as an artifact 
+      # named 'github-pages' as required by the deployment action.
+      # -----------------------------------------------------------
+      - name: 📦 Upload deployment artifact
         uses: actions/upload-artifact@v4
         with:
-          name: etl-data-output
-          path: data/
-          
-  # Job 2: 部署到 GitHub Pages (只有在 Job 1 成功後才會運行)
-  deploy-pages:
-    needs: build-etl # 依賴於 build-etl Job
-    runs-on: ubuntu-latest
-    
-    # 💥 必須包含此權限區塊 💥
-    permissions:
-      contents: read     # 允許讀取 Artifacts 和代碼
-      pages: write      # 授予將檔案寫入 GitHub Pages 服務的權限
-      id-token: write   # 啟用 OIDC 權杖，用於信任部署
-      
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-      
-    steps:
-      # 下載在 Job 1 中創建的數據 Artifact
-      - name: Download ETL Data Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: etl-data-output
-          path: data/ # 下載到本地的 data 資料夾
-          
-      - name: Checkout Code (For deployment)
-        uses: actions/checkout@v4
-        
-      # 設置 Pages 環境，這是部署的標準步驟
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
-        
-      # 部署步驟：將所有必要的檔案發佈到 Pages 服務
-      - name: Deploy to GitHub Pages
+          name: github-pages 
+          path: data/ # Path to the folder containing your GeoJSON and JSON outputs
+          retention-days: 1
+
+      - name: 🚀 Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      # -----------------------------------------------------------
+      # 🚀 DEPLOYMENT: Deploy the uploaded artifact
+      # -----------------------------------------------------------
+      - name: 🌐 Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-        with:
-          # 將工作目錄的所有內容 (index.html, data/) 部署
-          folder: .
