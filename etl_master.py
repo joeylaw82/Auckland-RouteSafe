@@ -13,7 +13,6 @@ import sys
 # --- 1. 配置區 (Configuration) ---
 POLICE_DATA_URL = os.environ.get("POLICE_DATA_URL") 
 MESHBLOCK_BASE_URL = "https://services.arcgis.com/XTtANUDT8Va4DLwI/arcgis/rest/services/nz_meshblocks/FeatureServer/0"
-# 新增的 Area Unit URL
 AREA_UNIT_BASE_URL = "https://services2.arcgis.com/vKb0s8tBIA3bdocZ/ArcGIS/rest/services/Area_Unit_2017/FeatureServer/0"
 ARCGIS_ROUTES_URL = "https://services2.arcgis.com/JkPEgZJGxhSjYOo0/arcgis/rest/services/BusService/FeatureServer/2/query?where=1%3D1&outFields=*&f=geojson"
 
@@ -25,7 +24,8 @@ OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'route_crime_stats.geojson')
 STATS_OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'crime_breakdown.json')
 DEBUG_CSV_FILE = os.path.join(OUTPUT_DIR, 'auckland_crime_debug.csv') 
 
-MAX_RECORDS = 2000 # ArcGIS 服務的單次查詢記錄限制
+# 💥 修正點: 降低單次請求記錄數以提高 ArcGIS 數據下載穩定性
+MAX_RECORDS = 500 
 
 
 # --- 2. 輔助函數 (Helper Functions) ---
@@ -108,7 +108,7 @@ def fetch_all_meshblock_geometry(base_url: str) -> gpd.GeoDataFrame:
     """獲取 Meshblock 幾何。"""
     gdf_final = fetch_arcgis_geometry(base_url, 'MB_number', ['MB_number'])
     if not gdf_final.empty:
-        # 標準化 MB_number 為 7 位字串
+        # 💥 修正點: 標準化 Meshblock ID 為 7 位字串
         gdf_final['MB_number'] = gdf_final['MB_number'].astype(str).str.strip().str.zfill(7)
         print(f"✅ 成功獲取所有 Meshblock 幾何總記錄數: {len(gdf_final)}")
     return gdf_final
@@ -118,7 +118,7 @@ def fetch_all_area_unit_geometry(base_url: str) -> gpd.GeoDataFrame:
     out_fields = ['AU2017_V1_00', 'AU2017_V1_00_NAME']
     gdf_final = fetch_arcgis_geometry(base_url, 'AU2017_V1_00', out_fields)
     if not gdf_final.empty:
-        # Area Unit Code 通常是 6 位，我們將其標準化
+        # 標準化 Area Unit Code 為 6 位字串
         gdf_final['AU_code'] = gdf_final['AU2017_V1_00'].astype(str).str.strip().str.zfill(6)
         gdf_final = gdf_final.rename(columns={'AU2017_V1_00_NAME': 'Area Unit Name'})
         print(f"✅ 成功獲取所有 Area Unit 幾何總記錄數: {len(gdf_final)}")
@@ -126,11 +126,11 @@ def fetch_all_area_unit_geometry(base_url: str) -> gpd.GeoDataFrame:
 
 
 def fetch_and_clean_police_data(crime_url: str, meshblock_url: str, area_unit_url: str) -> gpd.GeoDataFrame:
-    """下載、合併和篩選犯罪數據 (包含兩階段幾何匹配)。"""
+    """下載、合併和篩選犯罪數據 (包含兩階段幾何匹配和日期格式修正)。"""
     print("--- 1. 正在處理警察數據 ---")
     
     # ----------------------------------------------------
-    # 1. 數據下載和初始清理 (與之前相同)
+    # 1. 數據下載和初始清理
     # ----------------------------------------------------
     print("   -> 正在下載大型犯罪數據文件...")
     try:
@@ -199,8 +199,7 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str, area_unit_ur
         # 提取未匹配的行
         df_unmatched = df_merged[df_merged['geometry_mb'].isna()].copy()
         
-        # 假設 Area Unit Code 的格式與 Meshblock Code 相似，但長度為 6
-        # 我們截斷 Meshblock ID，並嘗試將其視為 Area Unit Code (AU2017_V1_00)
+        # 假設 Area Unit Code 的格式是 Meshblock Code 的前 6 位
         df_unmatched['AU_code_match'] = df_unmatched['Meshblock'].str[:6]
         
         df_area_merged = df_unmatched.merge(
@@ -226,10 +225,11 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str, area_unit_ur
     # 5. 數據清理和除錯輸出
     # ----------------------------------------------------
     
-    # 轉換時間欄位
+    # 💥 核心修正點：明確指定日期格式為 D/M/YYYY
+    print("   -> 正在轉換日期格式 (使用 %d/%m/%Y)...")
     df_merged[CRIME_MONTH_COL_NAME] = pd.to_datetime(
         df_merged[CRIME_MONTH_COL_NAME], 
-        format='%Y-%m-%d', 
+        format='%d/%m/%Y',  # <-- 關鍵修正
         errors='coerce' 
     )
     
@@ -241,7 +241,7 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str, area_unit_ur
         CRIME_MONTH_COL_NAME: 'CrimeMonth'
     })
     
-    # 輸出除錯 CSV (包含 geometry 欄位狀態)
+    # 輸出除錯 CSV (不包含幾何數據，但有其他所有欄位)
     DEBUG_CSV_FILE = os.path.join(OUTPUT_DIR, 'auckland_crime_debug.csv')
     df_final.drop(columns=['geometry']).to_csv(DEBUG_CSV_FILE, index=False, encoding='utf-8') 
     print(f"✅ 除錯文件 (auckland_crime_debug.csv) 輸出到 {DEBUG_CSV_FILE}")
@@ -251,11 +251,12 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str, area_unit_ur
     print(f"   -> 🚨 檢查: 經過兩階段匹配後，缺少幾何圖形的記錄數: {missing_geometry_count}")
     
     # 刪除沒有有效幾何圖形、犯罪月份或犯罪類型的行
+    initial_valid_count = len(df_final)
     df_final.dropna(subset=['geometry', 'CrimeMonth', 'OffenceType'], inplace=True)
-
+    
     print(f"✅ 警察數據處理完成。最終用於分析的記錄數: {len(df_final)}。")
-    if len(df_final) == 0 and len(df_auckland) > 0:
-        print("⚠️ 警告: 所有奧克蘭記錄均由於缺乏幾何或必要信息而被刪除。")
+    if len(df_final) < initial_valid_count and len(df_final) == 0:
+         print("⚠️ 警告: 所有記錄均由於缺乏幾何、日期或犯罪類型信息而被刪除。")
     
     gdf_crime = gpd.GeoDataFrame(
         df_final.drop(columns=['MB_number', 'Territorial Authority']),
@@ -358,57 +359,4 @@ def analyze_and_aggregate(gdf_routes: gpd.GeoDataFrame, gdf_crime: gpd.GeoDataFr
                                                         left_on='index', 
                                                         right_on='index_right', 
                                                         how='left')
-    gdf_results['Total_Crime_Count'] = gdf_results['Total_Crime_Count'].fillna(0).astype(int)
-    gdf_output = gdf_results.to_crs(epsg=4326)[['Route No', 'Total_Crime_Count', 'geometry']].copy()
-
-    # 8. 儲存結果
-    gdf_output.to_file(OUTPUT_FILE, driver='GeoJSON', encoding='utf-8')
-    print(f"✅ GeoJSON 輸出到 {OUTPUT_FILE}")
-    
-    with open(STATS_OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(crime_details, f, ensure_ascii=False, indent=4)
-    print(f"✅ 犯罪細分統計輸出到 {STATS_OUTPUT_FILE}")
-
-def empty_geojson_output(gdf_routes):
-    # 創建一個空的 GeoJSON 輸出
-    gdf_routes['Total_Crime_Count'] = 0
-    gdf_routes = gdf_routes.to_crs(epsg=4326)[['Route No', 'Total_Crime_Count', 'geometry']].copy()
-    gdf_routes.to_file(OUTPUT_FILE, driver='GeoJSON', encoding='utf-8')
-
-def empty_stats_output(min_date, max_date):
-    # 創建一個空的 JSON 輸出
-    crime_details = {
-        'metadata': {
-            'crime_period_start': min_date,
-            'crime_period_end': max_date,
-            'buffer_distance_m': 50,
-            'data_source': 'NZ Police (Full Available Dataset) merged with NZ Meshblock/Area Unit Geometry'
-        },
-        'routes': {}
-    }
-    with open(STATS_OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(crime_details, f, ensure_ascii=False, indent=4)
-
-
-# --- 5. 主流程 (Main Flow) ---
-def run_etl():
-    """運行 ETL 流程。"""
-    if not POLICE_DATA_URL:
-        print("❌ 錯誤：缺少 POLICE_DATA_URL 環境變量。請在 GitHub Secrets 中設置。")
-        sys.exit(1)
-        
-    try:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
-        
-        # 傳遞 Area Unit URL
-        gdf_crime = fetch_and_clean_police_data(POLICE_DATA_URL, MESHBLOCK_BASE_URL, AREA_UNIT_BASE_URL) 
-        gdf_routes = fetch_route_geometry()
-        analyze_and_aggregate(gdf_routes, gdf_crime)
-        print("\n🎉 ETL 流程全部成功完成！")
-    except Exception as e:
-        error_message = str(e).strip()
-        print(f"\n❌ ETL 流程中斷: {error_message}")
-        sys.exit(1)
-
-if __name__ == "__main__":
-    run_etl()
+    gdf_results['Total_Crime_Count
