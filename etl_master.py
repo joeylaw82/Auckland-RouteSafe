@@ -8,22 +8,24 @@ from datetime import datetime
 import re
 from time import sleep 
 from urllib.parse import urlencode 
-import sys # 引入 sys 用於錯誤處理
+import sys 
 
 # --- 1. 配置區 (Configuration) ---
-# POLICE_DATA_URL 將從 GitHub Actions/環境變量中獲取
+# 從 GitHub Actions 設置的 Secrets 或環境變量中獲取 URL
 POLICE_DATA_URL = os.environ.get("POLICE_DATA_URL") 
 MESHBLOCK_BASE_URL = "https://services.arcgis.com/XTtANUDT8Va4DLwI/arcgis/rest/services/nz_meshblocks/FeatureServer/0"
 ARCGIS_ROUTES_URL = "https://services2.arcgis.com/JkPEgZJGxhSjYOo0/arcgis/rest/services/BusService/FeatureServer/2/query?where=1%3D1&outFields=*&f=geojson"
 
+# 奧克蘭地區相關的 Territorial Authorities
 AUCKLAND_AUTHORITIES = ['Auckland','Waitemata', 'Counties Manukau', 'Franklin', 'Auckland City'] 
 
-# 輸出文件路徑 (確保 data 文件夾存在)
+# 輸出文件路徑
 OUTPUT_DIR = 'data'
 OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'route_crime_stats.geojson')
 STATS_OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'crime_breakdown.json')
+DEBUG_CSV_FILE = os.path.join(OUTPUT_DIR, 'auckland_crime_debug.csv') # 新增的除錯輸出文件
 
-MAX_RECORDS = 2000 # ArcGIS 限制
+MAX_RECORDS = 2000 # ArcGIS 服務的單次查詢記錄限制
 
 
 # --- 2. 輔助函數 (Helper Functions) ---
@@ -39,7 +41,7 @@ AUCKLAND_AUTHORITIES_CLEANED = [clean_territorial_authority(name) for name in AU
 
 
 def fetch_all_meshblock_geometry(base_url: str) -> gpd.GeoDataFrame:
-    """使用分頁技術獲取所有 Meshblock 幾何圖形 (修復版本)。"""
+    """使用分頁技術獲取所有 Meshblock 幾何圖形。"""
     print("   -> 正在使用分頁技術獲取所有 Meshblock 幾何...")
     
     count_url = f"{base_url}/query?where=1%3D1&returnCountOnly=true&f=json"
@@ -54,7 +56,7 @@ def fetch_all_meshblock_geometry(base_url: str) -> gpd.GeoDataFrame:
             return gpd.GeoDataFrame()
     except Exception as e:
         print(f"❌ 獲取總記錄數失敗: {e}")
-        return gpd.GeoDataFrame()
+        return gpd.yoGeoDataFrame()
 
     all_meshblocks = []
     offset = 0
@@ -99,8 +101,8 @@ def fetch_all_meshblock_geometry(base_url: str) -> gpd.GeoDataFrame:
     gdf_final = pd.concat(all_meshblocks, ignore_index=True)
     gdf_final = gdf_final[['MB_number', 'geometry']].copy()
     
-    # 關鍵修正: 確保 Meshblock ID 欄位類型和值乾淨
-    gdf_final['MB_number'] = gdf_final['MB_number'].astype(str).str.strip()
+    # 💥 修正點 1: 標準化 MB_number 為 7 位字串 (補齊前導零)
+    gdf_final['MB_number'] = gdf_final['MB_number'].astype(str).str.strip().str.zfill(7)
     
     print(f"✅ 成功獲取所有 Meshblock 幾何總記錄數: {len(gdf_final)}")
     
@@ -108,7 +110,7 @@ def fetch_all_meshblock_geometry(base_url: str) -> gpd.GeoDataFrame:
 
 
 def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDataFrame:
-    """下載、合併和篩選犯罪數據。"""
+    """下載、合併、篩選犯罪數據，並輸出除錯 CSV。"""
     print("--- 1. 正在處理警察數據 ---")
     
     print("   -> 正在下載大型犯罪數據文件...")
@@ -120,7 +122,7 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
             encoding='latin1'
         )
         
-        # 1. 核心欄位清理: 移除所有列名中的前後空白符和 BOM
+        # 核心欄位清理: 移除所有列名中的前後空白符和 BOM
         df_crime.columns = df_crime.columns.str.strip()
         first_col = df_crime.columns[0]
         if first_col.startswith('ï»¿'):
@@ -131,7 +133,6 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
         
         if CRIME_MONTH_COL_NAME not in df_crime.columns:
             print(f"❌ 錯誤: 在犯罪數據中找不到 '{CRIME_MONTH_COL_NAME}' 欄位。")
-            print(f"   -> 已清理的欄位名稱列表: {list(df_crime.columns)}")
             raise KeyError(f"找不到必要的 '{CRIME_MONTH_COL_NAME}' 欄位。")
             
         if 'Meshblock' not in df_crime.columns:
@@ -140,7 +141,6 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
                 df_crime.rename(columns={meshblock_col: 'Meshblock'}, inplace=True)
             else:
                 print(f"❌ 錯誤: 在犯罪數據中找不到 'Meshblock' 列。")
-                print(f"   -> 已清理的欄位名稱列表: {list(df_crime.columns)}")
                 raise KeyError(f"找不到必要的 'Meshblock' 欄位。")
         
         print(f"   -> 犯罪數據原始記錄數: {len(df_crime)}") 
@@ -155,14 +155,14 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
     if gdf_meshblocks.empty:
         return gpd.GeoDataFrame()
         
-    # 關鍵修正: 確保警察數據的 Meshblock ID 乾淨
-    df_crime['Meshblock'] = df_crime['Meshblock'].astype(str).str.strip()
+    # 💥 修正點 2: 標準化警察數據的 Meshblock ID 為 7 位字串
+    df_crime['Meshblock'] = df_crime['Meshblock'].astype(str).str.strip().str.zfill(7)
 
     
     # --- 合併和篩選奧克蘭 ---
     print("   -> 正在合併數據和篩選奧克蘭地區...")
     
-    # 執行合併 (使用 how='left' 以保留所有犯罪記錄，並在找不到匹配的幾何時留下 NaN)
+    # 使用 how='left' 進行合併，保留所有犯罪記錄，即使 geometry 匹配失敗
     df_merged = df_crime.merge(
         gdf_meshblocks, 
         left_on='Meshblock', 
@@ -178,11 +178,17 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
     
     print(f"   -> 奧克蘭TA過濾後記錄數: {len(df_auckland)}")
     
+    # --- 輸出除錯 CSV ---
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    df_auckland.to_csv(DEBUG_CSV_FILE, index=False, encoding='utf-8')
+    print(f"✅ 除錯文件 (auckland_crime_debug.csv) 輸出到 {DEBUG_CSV_FILE}")
+    # ---------------------------
+
     # 轉換時間欄位 
     df_auckland[CRIME_MONTH_COL_NAME] = pd.to_datetime(
         df_auckland[CRIME_MONTH_COL_NAME], 
         format='%Y-%m-%d', 
-        errors='coerce' # 無效值轉換為 NaT
+        errors='coerce' 
     )
     
     df_final = df_auckland.copy()
@@ -196,7 +202,6 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
     # --- 檢查數據質量並刪除無效行 ---
     initial_auckland_count = len(df_final)
     
-    # 顯示缺失情況，幫助您驗證合併問題
     missing_geometry_count = df_final['geometry'].isna().sum()
     unmerged_meshblocks = df_final[df_final['geometry'].isna()]['Meshblock'].nunique()
     print(f"   -> 🚨 檢查: 缺少幾何圖形的奧克蘭記錄數 (合併失敗): {missing_geometry_count} / ({unmerged_meshblocks} 個 Meshblock ID 碼)")
@@ -209,7 +214,7 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
         print("⚠️ 警告: 所有奧克蘭記錄均由於缺乏 Meshblock 幾何或必要信息而被刪除。請檢查 Meshblock ID 匹配。")
     
     gdf_crime = gpd.GeoDataFrame(
-        df_final.drop(columns=['MB_number', 'Territorial Authority']), # 移除冗餘列
+        df_final.drop(columns=['MB_number', 'Territorial Authority']),
         geometry='geometry', 
         crs="EPSG:4326"
     )
@@ -244,13 +249,12 @@ def analyze_and_aggregate(gdf_routes: gpd.GeoDataFrame, gdf_crime: gpd.GeoDataFr
     """執行空間連接、計算統計數據並生成 GeoJSON 和 JSON 文件。"""
     print("--- 3. 執行空間分析和數據彙總 ---")
     
-    os.makedirs(OUTPUT_DIR, exist_ok=True) # 確保輸出目錄存在
+    os.makedirs(OUTPUT_DIR, exist_ok=True) 
     
     if gdf_crime.empty:
         print("⚠️ 警告：由於沒有有效的奧克蘭犯罪數據，跳過空間分析。")
         min_date = 'N/A'
         max_date = 'N/A'
-        # 即使數據為空，也輸出空結果，確保 Actions 不會因缺少檔案而失敗
         empty_geojson_output(gdf_routes) 
         empty_stats_output(min_date, max_date)
         return
@@ -359,7 +363,6 @@ def run_etl():
     except Exception as e:
         error_message = str(e).strip()
         print(f"\n❌ ETL 流程中斷: {error_message}")
-        # 如果是 KeyError，腳本將會輸出欄位列表，幫助您調試
         sys.exit(1)
 
 if __name__ == "__main__":
