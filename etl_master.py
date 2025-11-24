@@ -15,7 +15,6 @@ from shapely.geometry import Point
 # --- 1. Configuration ---
 POLICE_DATA_URL = os.environ.get("POLICE_DATA_URL") 
 MESHBLOCK_BASE_URL = "https://services.arcgis.com/XTtANUDT8Va4DLwI/arcgis/rest/services/nz_meshblocks/FeatureServer/0"
-# MESHBLOCK_BACKUP_URL is intentionally removed as we now rely on Polygon geometry
 ARCGIS_ROUTES_URL = "https://services2.arcgis.com/JkPEgZJGxhSjYOo0/arcgis/rest/services/BusService/FeatureServer/2/query?where=1%3D1&outFields=*&f=geojson"
 ARCGIS_STOPS_URL = "https://services2.arcgis.com/JkPEgZJGxhSjYOo0/ArcGIS/rest/services/BusService/FeatureServer/0" 
 
@@ -27,7 +26,7 @@ OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'route_crime_stats.geojson')
 STATS_OUTPUT_FILE = os.path.join(OUTPUT_DIR, 'crime_breakdown.json')
 
 # Max records per ArcGIS request for stability
-MAX_RECORDS = 2000
+MAX_RECORDS = 500 
 TARGET_CRS = "EPSG:2193" # NZTM2000 for metric spatial operations
 
 
@@ -93,6 +92,7 @@ def fetch_arcgis_geometry(base_url: str, id_field: str, out_fields: list, mode='
                     break
                     
                 df_batch = pd.DataFrame([f['attributes'] for f in features])
+                
                 # Bus stop coordinates are in NZTM2000 (EPSG:2193)
                 geometry = [Point(f['geometry']['x'], f['geometry']['y']) for f in features]
                 gdf_batch = gpd.GeoDataFrame(df_batch, geometry=geometry, crs="EPSG:2193") 
@@ -124,7 +124,6 @@ def fetch_arcgis_geometry(base_url: str, id_field: str, out_fields: list, mode='
     col_map = {c.upper(): c for c in gdf_final.columns}
     final_cols = [col_map[c] for c in required_cols if c in col_map]
     
-    # Filter to only the required columns
     return gdf_final[final_cols].copy()
 
 def fetch_all_meshblock_geometry(base_url: str) -> gpd.GeoDataFrame:
@@ -184,18 +183,23 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
     print(f"   -> Auckland filtered records: {len(df_auckland)}")
     
     # ----------------------------------------------------
-    # 3. Merge: Meshblock Polygon Match
+    # 3. Merge: Meshblock Polygon Match (FIX APPLIED HERE)
     # ----------------------------------------------------
     print("   -> Executing Merge: Meshblock Polygon geometry match...")
+    
+    # Rename the geometry column in gdf_meshblocks for a clean merge key
+    gdf_meshblocks = gdf_meshblocks.rename(columns={'geometry': 'geometry_mb_source'})
+
     df_merged = df_auckland.merge(
-        gdf_meshblocks[['MB_number', 'geometry']], 
+        gdf_meshblocks[['MB_number', 'geometry_mb_source']], 
         left_on='Meshblock', 
         right_on='MB_number', 
         how='left'
     )
-    df_merged = df_merged.rename(columns={'geometry': 'geometry_mb'})
+    # RENAME the source geometry column to the final expected name 'geometry'
+    df_merged = df_merged.rename(columns={'geometry_mb_source': 'geometry'}) 
     
-    unmatched_count = df_merged['geometry_mb'].isna().sum()
+    unmatched_count = df_merged['geometry'].isna().sum()
     print(f"   -> Successfully matched records (Polygons): {len(df_merged) - unmatched_count}")
     
     # ----------------------------------------------------
@@ -215,10 +219,10 @@ def fetch_and_clean_police_data(crime_url: str, meshblock_url: str) -> gpd.GeoDa
         'ANZSOC Division': 'OffenceType',     
         'Territorial Authority Cleaned': 'PoliceDistrict', 
         CRIME_MONTH_COL_NAME: 'CrimeMonth',
-        'geometry_mb': 'geometry' # RETAIN POLYGON GEOMETRY
+        # 'geometry' column already exists from the merge above
     })
     
-    # Drop records that have no Polygon geometry
+    # Drop records that have no Polygon geometry (now guaranteed to find 'geometry')
     initial_valid_count = len(df_final)
     df_final.dropna(subset=['geometry'], inplace=True) 
     
@@ -242,7 +246,6 @@ def fetch_route_geometry() -> gpd.GeoDataFrame:
     """Fetches bus route geometry (LineString)."""
     print("--- 2. Fetching AT Route Geometry (LineString) ---")
     try:
-        # Fetching bus routes (LineString). CRS is typically 4326/WGS 84
         route_response = requests.get(ARCGIS_ROUTES_URL)
         route_response.raise_for_status() 
         gdf_routes = gpd.read_file(io.BytesIO(route_response.content))
@@ -337,9 +340,6 @@ def analyze_and_aggregate(gdf_routes: gpd.GeoDataFrame, gdf_crime: gpd.GeoDataFr
         predicate='contains'
     )
 
-    # To link stop_join (Meshblock-Crime) to Route, we assume if a crime Meshblock 
-    # contains a stop, the crime should be associated with *all* routes passing through that Meshblock (via line_join).
-    
     # Find all unique Meshblocks that contain a stop AND have a crime
     crime_meshblocks_with_stops = stop_join[['Meshblock']].drop_duplicates()
     
